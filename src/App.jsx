@@ -107,18 +107,25 @@ function toCSV(headers, rows) {
 
 function useLocalState() {
   const [state, setState] = useState(() => {
+    // 1) Tenter de charger ce qui est déjà enregistré
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
         return JSON.parse(saved);
-      } catch (e) {}
+      } catch (e) {
+        console.error("Erreur de parsing du localStorage :", e);
+      }
     }
+
+    // 2) Sinon, retourner TON état initial (celui que tu avais déjà)
+    // 👉 Garde tout ce que tu avais (leads, clients, products p1/p2, orders, suppliers, pos, returns, settings, etc.)
+    // Exemple simplifié ci‑dessous, remets ton bloc complet :
     const p1 = {
       id: uid(),
-      sku: 'OJAR-WW-70',
-      name: 'OJAR Wood Whisper 70ml',
-      brand: 'OJAR',
-      family: 'Ambré boisé',
+      sku: "OJAR-WW-70",
+      name: "OJAR Wood Whisper 70ml",
+      brand: "OJAR",
+      family: "Ambré boisé",
       volume: 70,
       priceRetailTTC: 85000,
       priceWholesaleTTC: 78000,
@@ -132,10 +139,10 @@ function useLocalState() {
     };
     const p2 = {
       id: uid(),
-      sku: 'XJ-EP-100',
-      name: 'Xerjoff Erba Pura 100ml',
-      brand: 'Xerjoff',
-      family: 'Hespéridé gourmand',
+      sku: "XJ-EP-100",
+      name: "Xerjoff Erba Pura 100ml",
+      brand: "Xerjoff",
+      family: "Hespéridé gourmand",
       volume: 100,
       priceRetailTTC: 140000,
       priceWholesaleTTC: 125000,
@@ -147,6 +154,7 @@ function useLocalState() {
       leadTimeDays: 21,
       moq: 4,
     };
+
     return {
       settings: {
         tva: 0.18,
@@ -154,112 +162,25 @@ function useLocalState() {
         reorder_window_days: 60,
         holding_rate: 0.25,
       },
-      leads: [
-        {
-          id: uid(),
-          name: 'Noura K.',
-          ig: '@nourak_',
-          city: 'Abidjan',
-          source: 'DM Instagram',
-          status: 'Contacté',
-          tags: ['Prospect'],
-          interests: [p1.name],
-          value: 85000,
-          nextFollowUp: todayISO(),
-          notes:
-            'Aime boisés/vanillés. Proposer Wood Whisper + Vanille Fatale.',
-          createdAt: todayISO(),
-        },
-        {
-          id: uid(),
-          name: 'Yann B.',
-          ig: '@yannbiz',
-          city: 'Abidjan',
-          source: 'Story',
-          status: 'Qualifié',
-          tags: ['VIP'],
-          interests: ['YSL La Nuit de l’Homme'],
-          value: 72000,
-          nextFollowUp: todayISO(),
-          notes: 'Parfum soir, sillage modéré.',
-          createdAt: todayISO(),
-        },
-        {
-          id: uid(),
-          name: 'Aïcha D.',
-          ig: '@aicha.fragrance',
-          city: 'Cocody',
-          source: 'Referral',
-          status: 'Nouveau',
-          tags: ['Influenceur'],
-          interests: [p2.name],
-          value: 140000,
-          nextFollowUp: todayISO(),
-          notes: 'Aime agrumes sucrés.',
-          createdAt: todayISO(),
-        },
-      ],
-      clients: [
-        {
-          id: uid(),
-          name: 'Client Comptoir',
-          tags: ['Retail'],
-          city: 'Abidjan',
-        },
-      ],
+      leads: [/* … tes leads initiaux … */],
+      clients: [{ id: uid(), name: "Client Comptoir", tags: ["Retail"], city: "Abidjan" }],
       products: [p1, p2],
-      orders: [
-        {
-          id: uid(),
-          number: 'CMD-0001',
-          date: todayISO(),
-          clientName: 'Client Comptoir',
-          status: 'Livrée',
-          channel: 'Boutique',
-          discount: 0,
-          shipping: 2000,
-          lines: [
-            {
-              id: uid(),
-              productId: p1.id,
-              name: p1.name,
-              qty: 1,
-              priceTTC: p1.priceRetailTTC,
-              cogsUnit: p1.cmp, // COGS capturé
-            },
-          ],
-          payments: [
-            {
-              mode: 'Espèces',
-              amount: p1.priceRetailTTC + 2000,
-              date: todayISO(),
-            },
-          ],
-        },
-      ],
+      orders: [/* … tes commandes initiales … */],
       stockMoves: [],
-      suppliers: [
-        {
-          id: uid(),
-          name: 'Fournisseur Istanbul',
-          contact: 'mehmet@exemple.com',
-          leadDays: 14,
-          moq: 6,
-          currency: 'EUR',
-        },
-      ],
+      suppliers: [/* … tes fournisseurs initiaux … */],
       pos: [],
       returns: [],
     };
   });
 
-  useEffect(
-    () => localStorage.setItem(STORAGE_KEY, JSON.stringify(state)),
-    [state]
-  );
+  // 3) Sauvegarde automatique à chaque modification
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }, [state]);
 
   return [state, setState];
 }
+
 /* ===================== Inventory cost utils ===================== */
 
 // Estime la demande annuelle à partir des commandes (en unités) pour un produit
