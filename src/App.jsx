@@ -260,6 +260,115 @@ function useLocalState() {
 
   return [state, setState];
 }
+/* ===================== Inventory cost utils ===================== */
+
+// Estime la demande annuelle à partir des commandes (en unités) pour un produit
+function estimateAnnualDemand(orders, productId) {
+  // somme des qté sur 365 derniers jours (ou tout l'historique si peu de données)
+  const oneYearAgo = new Date();
+  oneYearAgo.setDate(oneYearAgo.getDate() - 365);
+  const cutoff = oneYearAgo.toISOString().slice(0,10);
+  const qty = sum(
+    orders.filter(o => (o.date || "0000-00-00") >= cutoff),
+    o => sum(o.lines||[], l => (l.productId===productId ? (l.qty||0) : 0))
+  );
+  return Math.max(0, qty); // D en unités / an (estimation basique)
+}
+
+// Estime la demande quotidienne & l’écart-type basique sur n jours (très MVP)
+function estimateDailyDemandStats(orders, productId, daysWindow=90) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - daysWindow);
+  const key = cutoff.toISOString().slice(0,10);
+
+  // total vendu sur fenêtre
+  const sold = sum(
+    orders.filter(o => (o.date||"0000-00-00") >= key),
+    o => sum(o.lines||[], l => (l.productId===productId ? (l.qty||0) : 0))
+  );
+  const d = sold / Math.max(1, daysWindow); // moyenne/jour
+
+  // écart-type très simple (Poisson approx) => sigma ≈ sqrt(d)
+  const sigma = Math.sqrt(Math.max(0, d));
+  return { d, sigma };
+}
+
+/**
+ * Calcule EOQ & coûts classiques.
+ * @param {Object} p        produit
+ * @param {Object} opts
+ *  - orders: commandes
+ *  - holding_rate: taux de possession annuel (ex: 0.25)
+ *  - order_cost: coût de passation (par commande) en FCFA
+ *  - leadTimeDays: délai (jours)
+ *  - serviceZ: Z service (ex: 1.65 ~ 95%)
+ */
+function computeInventoryEconomics(p, opts) {
+  const {
+    orders = [],
+    holding_rate = 0.25,
+    order_cost = 20000,
+    leadTimeDays = Number(p.leadTimeDays||14),
+    serviceZ = 1.65,
+  } = opts || {};
+
+  // Données de base
+  const C = Number(p.cmp || 0); // coût unitaire (CMP)
+  const D = Math.max(0, estimateAnnualDemand(orders, p.id)); // Demande annuelle (unités)
+  const H = holding_rate * C;  // coût de possession unitaire annuel
+  const S = Number(order_cost || 0); // coût de commande
+  const L = Math.max(1, Number(leadTimeDays||14));
+
+  // EOQ (Wilson):
+  const EOQ = D>0 && H>0 ? Math.sqrt((2*D*S)/(H)) : 0;
+
+  // Stock de sécurité (SS) + ROP
+  const stats = estimateDailyDemandStats(orders, p.id, 90);
+  const d_day = stats.d;           // demande moyenne / jour
+  const sigma_day = stats.sigma;   // écart-type / jour (approx)
+  const SS = serviceZ * sigma_day * Math.sqrt(L);
+  const ROP = d_day * L + SS;
+
+  // Choix d’une Q (si tu veux simuler) : on prend EOQ par défaut
+  const Q = Math.max(0, EOQ);
+
+  // Coût de possession (approche : stock moyen = Q/2 + SS)
+  const avgInvUnits = (Q/2) + SS;
+  const holdingCost = avgInvUnits * H;
+
+  // Coût de commande annuel
+  const orderingCost = (Q>0) ? (D/Q) * S : 0;
+
+  // Coût d’achat annuel (facultatif, pour total complet)
+  const purchaseCost = D * C;
+
+  // Total
+  const totalCost = holdingCost + orderingCost + purchaseCost;
+
+  // Rotations (COGS / stock moyen valeur)
+  const avgInvValue = avgInvUnits * C;
+  const cogsYear = D * C;
+  const turns = avgInvValue>0 ? (cogsYear / avgInvValue) : 0;
+
+  return {
+    EOQ,
+    ROP,
+    SS,
+    avgInvUnits,
+    avgInvValue,
+    holdingCost,
+    orderingCost,
+    purchaseCost,
+    totalCost,
+    turns,
+    d_day,
+    L,
+    D,
+    H,
+    S,
+    C,
+  };
+}
 
 /* ===================== Small UI primitives ===================== */
 
@@ -822,6 +931,8 @@ function createManualCredit({ clientName, date, amount, note }) {
                 { k: 'replenish', t: 'Réassort' },
                 { k: "ar", t: "Crédits" },
                 { k: 'mov', t: 'Mouvements' },
+                { k: "invCosts", t: "Coûts inventaire" },
+
               ].map((it) => (
                 <button
                   key={it.k}
@@ -863,6 +974,9 @@ function createManualCredit({ clientName, date, amount, note }) {
     onAddPayment={addPayment}
     onCreateCredit={createManualCredit}
   />
+)}
+{tab === "invCosts" && (
+  <InventoryCosts products={products} orders={orders} settings={settings} />
 )}
 
           {tab === 'crm' && (
@@ -2276,6 +2390,128 @@ function Catalog({ products, onSave }) {
           />
         )}
       </Modal>
+    </div>
+  );
+}
+/* ===================== Inventory Costs Panel ===================== */
+
+function InventoryCosts({ products, orders, settings }) {
+  const [orderCost, setOrderCost] = useState(20000);
+  const [serviceZ, setServiceZ] = useState(Number(settings?.service_level_z ?? 1.65));
+
+  const rows = useMemo(() => {
+    return (products || []).map(p => {
+      const res = computeInventoryEconomics(p, {
+        orders,
+        holding_rate: Number(settings?.holding_rate ?? 0.25),
+        order_cost: orderCost,
+        leadTimeDays: Number(p.leadTimeDays || 14),
+        serviceZ: serviceZ,
+      });
+      return { product: p, ...res };
+    });
+  }, [products, orders, settings, orderCost, serviceZ]);
+
+  // Totaux
+  const totalHolding = sum(rows, r => r.holdingCost);
+  const totalOrdering = sum(rows, r => r.orderingCost);
+  const totalPurchase = sum(rows, r => r.purchaseCost);
+  const totalAll = totalHolding + totalOrdering + totalPurchase;
+
+  return (
+    <div className="space-y-3">
+      <div className="text-lg font-semibold">Coûts d’inventaire (EOQ, ROP, SS)</div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 rounded-2xl border bg-white p-4">
+        <NumberField
+          label="Coût de commande (S)"
+          value={orderCost}
+          onChange={setOrderCost}
+        />
+        <NumberField
+          label="Z (niveau de service)"
+          step="0.01"
+          value={serviceZ}
+          onChange={setServiceZ}
+        />
+        <div className="rounded-xl border p-3">
+          <div className="text-sm text-gray-600">Taux de possession (H = r * C)</div>
+          <div className="text-xl font-semibold">{Math.round((settings?.holding_rate??0.25)*100)}%</div>
+        </div>
+      </div>
+
+      <div className="rounded-2xl border overflow-x-auto bg-white">
+        <table className="min-w-full text-sm">
+          <thead className="bg-gray-50">
+            <tr className="text-left">
+              <th className="px-3 py-3">Produit</th>
+              <th className="px-3 py-3">CMP (C)</th>
+              <th className="px-3 py-3">Demande/an (D)</th>
+              <th className="px-3 py-3">EOQ</th>
+              <th className="px-3 py-3">ROP</th>
+              <th className="px-3 py-3">SS</th>
+              <th className="px-3 py-3">Stock moyen (u)</th>
+              <th className="px-3 py-3">Possession</th>
+              <th className="px-3 py-3">Commande</th>
+              <th className="px-3 py-3">Achat</th>
+              <th className="px-3 py-3">Total</th>
+              <th className="px-3 py-3">Rotations</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.product.id} className="border-t">
+                <td className="px-3 py-3">
+                  <div className="font-medium">{r.product.name}</div>
+                  <div className="text-xs text-gray-500">Lead: {r.L} j • d/j: {r.d_day.toFixed(2)}</div>
+                </td>
+                <td className="px-3 py-3">{fmtMoney(r.C)}</td>
+                <td className="px-3 py-3">{Math.round(r.D)}</td>
+                <td className="px-3 py-3">{Math.round(r.EOQ)}</td>
+                <td className="px-3 py-3">{Math.round(r.ROP)}</td>
+                <td className="px-3 py-3">{Math.round(r.SS)}</td>
+                <td className="px-3 py-3">{Math.round(r.avgInvUnits)}</td>
+                <td className="px-3 py-3">{fmtMoney(Math.round(r.holdingCost))}</td>
+                <td className="px-3 py-3">{fmtMoney(Math.round(r.orderingCost))}</td>
+                <td className="px-3 py-3">{fmtMoney(Math.round(r.purchaseCost))}</td>
+                <td className="px-3 py-3 font-medium">{fmtMoney(Math.round(r.totalCost))}</td>
+                <td className="px-3 py-3">{r.turns.toFixed(2)}x</td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={12} className="px-3 py-8 text-center text-gray-500">
+                  Aucun produit
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+        <div className="rounded-xl border p-3">
+          <div className="text-sm text-gray-600">Possession (∑)</div>
+          <div className="text-xl font-semibold">{fmtMoney(Math.round(totalHolding))}</div>
+        </div>
+        <div className="rounded-xl border p-3">
+          <div className="text-sm text-gray-600">Commande (∑)</div>
+          <div className="text-xl font-semibold">{fmtMoney(Math.round(totalOrdering))}</div>
+        </div>
+        <div className="rounded-xl border p-3">
+          <div className="text-sm text-gray-600">Achat (∑)</div>
+          <div className="text-xl font-semibold">{fmtMoney(Math.round(totalPurchase))}</div>
+        </div>
+        <div className="rounded-xl border p-3">
+          <div className="text-sm text-gray-600">Total</div>
+          <div className="text-xl font-semibold">{fmtMoney(Math.round(totalAll))}</div>
+        </div>
+      </div>
+
+      <div className="text-xs text-gray-500 px-1">
+        Méthode simple (MVP) : demande annuelle & journalière estimées via l’historique de commandes, 
+        σ journée ≈ √(d/j). À raffiner plus tard (variabilité lead time, saisonnalité, coûts par SKU…).
+      </div>
     </div>
   );
 }
