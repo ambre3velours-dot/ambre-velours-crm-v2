@@ -655,6 +655,38 @@ export default function App() {
     saveOrder(next);
     alert('Commande confirmée ✔ (stock décrémenté)');
   }
+// Encaisser un paiement sur une commande existante
+function addPayment(orderId, mode, amount) {
+  if (!amount || amount <= 0) return;
+  setState((s) => ({
+    ...s,
+    orders: s.orders.map((o) =>
+      o.id === orderId
+        ? { ...o, payments: [...(o.payments || []), { mode, amount: Number(amount), date: todayISO() }] }
+        : o
+    ),
+  }));
+}
+
+// Crédits manuels (sans ligne de produit stock) – compté dans le CA, COGS = 0
+function createManualCredit({ clientName, date, amount, note }) {
+  const o = {
+    id: uid(),
+    number: `CMD-${String(state.orders.length + 1).padStart(4, "0")}`,
+    date: date || todayISO(),
+    clientName: clientName || "Client",
+    status: "Confirmée",
+    channel: "Boutique",
+    discount: 0,
+    shipping: 0,
+    lines: [
+      { id: uid(), productId: null, name: note || "Crédit manuel", qty: 1, priceTTC: Number(amount || 0), cogsUnit: 0 },
+    ],
+    payments: [],
+  };
+  saveOrder(o);
+  alert("Crédit manuel créé ✔");
+}
 
   // Suppliers & POs
   function saveSupplier(sup) {
@@ -788,6 +820,7 @@ export default function App() {
                 { k: 'po', t: 'Bons de commande' },
                 { k: 'returns', t: 'Retours' },
                 { k: 'replenish', t: 'Réassort' },
+                { k: "ar", t: "Crédits" },
                 { k: 'mov', t: 'Mouvements' },
               ].map((it) => (
                 <button
@@ -802,6 +835,12 @@ export default function App() {
                   {it.t}
                 </button>
               ))}
+              <button
+    onClick={() => setTab("ar")}
+    className={`px-3 py-2 rounded-xl text-sm ${tab === "ar" ? "bg-white/20" : "bg-white/10 hover:bg-white/20"}`}
+  >
+    Crédits
+  </button>
             </nav>
           </div>
         </div>
@@ -817,10 +856,27 @@ export default function App() {
               suggestions={suggestions}
             />
           )}
+{tab === "ar" && (
+  <Receivables
+    orders={orders}
+    products={products}
+    onAddPayment={addPayment}
+    onCreateCredit={createManualCredit}
+  />
+)}
 
           {tab === 'crm' && (
             <CRM leads={leads} onSave={saveLead} onDelete={delLead} />
           )}
+          {tab === "ar" && (
+  <Receivables
+    orders={orders}
+    products={products}
+    onAddPayment={addPayment}
+    onCreateCredit={createManualCredit}
+  />
+)}
+
 
           {tab === 'orders' && (
             <Orders
@@ -867,6 +923,129 @@ export default function App() {
     </ErrorBoundary>
   );
 }
+function Receivables({ orders, products, onAddPayment, onCreateCredit }) {
+  const [encaisse, setEncaisse] = useState(null); // {order, mode, amount}
+  const [showCredit, setShowCredit] = useState(false);
+
+  const rows = useMemo(() => {
+    return orders
+      .filter((o) => o.status !== "Annulée")
+      .map((o) => {
+        const subtotal = (o.lines || []).reduce((s, l) => s + (Number(l.priceTTC) || 0) * (Number(l.qty) || 0), 0);
+        const total = subtotal - (o.discount || 0) + (o.shipping || 0);
+        const paid = (o.payments || []).reduce((s, p) => s + (Number(p.amount) || 0), 0);
+        const rest = Math.max(0, total - paid);
+        return { order: o, total, paid, rest };
+      })
+      .filter((r) => r.rest > 0)
+      .sort((a, b) => b.rest - a.rest);
+  }, [orders]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="text-lg font-semibold">Crédits & Restes à payer</div>
+        <button onClick={() => setShowCredit(true)} className="rounded-xl bg-black text-white px-4 py-2 text-sm">➕ Crédit manuel</button>
+      </div>
+
+      <div className="rounded-2xl border overflow-x-auto bg-white">
+        <table className="min-w-full text-sm">
+          <thead className="bg-gray-50">
+            <tr className="text-left">
+              <th className="px-3 py-3">Commande</th>
+              <th className="px-3 py-3">Client</th>
+              <th className="px-3 py-3">Total</th>
+              <th className="px-3 py-3">Payé</th>
+              <th className="px-3 py-3">Reste</th>
+              <th className="px-3 py-3 text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(({ order, total, paid, rest }) => (
+              <tr key={order.id} className="border-t">
+                <td className="px-3 py-3">{order.number}</td>
+                <td className="px-3 py-3">{order.clientName || "—"}</td>
+                <td className="px-3 py-3">{fmtMoney(total)}</td>
+                <td className="px-3 py-3">{fmtMoney(paid)}</td>
+                <td className="px-3 py-3 font-medium">{fmtMoney(rest)}</td>
+                <td className="px-3 py-3 text-right">
+                  <button
+                    className="px-3 py-1 rounded-lg border text-sm"
+                    onClick={() => setEncaisse({ order, mode: "Espèces", amount: rest })}
+                  >
+                    Encaisser
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr><td colSpan={6} className="px-3 py-8 text-center text-gray-500">Aucun reste à payer</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Modale encaissement */}
+      {encaisse && (
+        <Modal open={!!encaisse} onClose={() => setEncaisse(null)} title={`Encaisser • ${encaisse.order.number}`}>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <Select
+              label="Mode"
+              value={encaisse.mode}
+              onChange={(v) => setEncaisse((e) => ({ ...e, mode: v }))}
+              options={["Espèces", "Mobile Money", "Virement", "CB"]}
+            />
+            <NumberField
+              label="Montant"
+              value={encaisse.amount}
+              onChange={(n) => setEncaisse((e) => ({ ...e, amount: n }))}
+            />
+            <div className="flex items-end">
+              <button
+                onClick={() => { onAddPayment(encaisse.order.id, encaisse.mode, encaisse.amount); setEncaisse(null); }}
+                className="rounded-2xl bg-black text-white px-5 py-2 text-sm"
+              >
+                Valider
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Modale crédit manuel */}
+      {showCredit && (
+        <Modal open={showCredit} onClose={() => setShowCredit(false)} title="Nouveau crédit manuel">
+          <CreateCreditForm
+            onCancel={() => setShowCredit(false)}
+            onCreate={(payload) => { onCreateCredit(payload); setShowCredit(false); }}
+          />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function CreateCreditForm({ onCreate, onCancel }) {
+  const [clientName, setClientName] = useState("");
+  const [date, setDate] = useState(todayISO());
+  const [amount, setAmount] = useState(0);
+  const [note, setNote] = useState("Crédit manuel");
+  return (
+    <div className="space-y-3">
+      <div className="grid md:grid-cols-2 gap-3">
+        <TextField label="Client" value={clientName} onChange={setClientName} />
+        <DateField label="Date" value={date} onChange={setDate} />
+        <NumberField label="Montant TTC" value={amount} onChange={setAmount} />
+        <TextField label="Libellé" value={note} onChange={setNote} />
+      </div>
+      <div className="flex items-center gap-3 pt-2">
+        <button onClick={() => onCreate({ clientName, date, amount, note })} className="rounded-2xl bg-black text-white px-5 py-2 text-sm">Créer</button>
+        <button onClick={onCancel} className="text-sm text-gray-600">Annuler</button>
+      </div>
+    </div>
+  );
+}
+
 
 /* ===================== Dashboard ===================== */
 
